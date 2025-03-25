@@ -1,0 +1,9 @@
+{{#if isAuthenticated}}
+    <script>
+        window.location.href = '/chat';
+    </script>
+{{else}}
+    <p>Welcome to Microsoft Authentication Library For Node Tutorial</p>
+    <p>Please sign in to access the chat!</p>
+    <a href="/auth/signin" class="btn btn-primary">Sign in</a>
+{{/if}}
