@@ -41,6 +41,9 @@ router.post('/redirect', async (req, res) => {
     try {
         const response = await authProvider.acquireTokenByCode(tokenRequest);
         req.session.account = response.account;
+
+        // Store user's name in the session
+        req.session.userName = response.account.name || response.account.username;
         
         // Acquire Purview token separately
         try {

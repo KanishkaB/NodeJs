@@ -1,7 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { callProcessContentAPI, callProtectionScopeAPI } = require('../helpers/purviewHelper'); // Remove generateGUID import
+const { callProcessContentAPI, callProtectionScopeAPI } = require('../helpers/purviewHelper'); // Re-import callProtectionScopeAPI
 const { v4: uuidv4 } = require('uuid'); // Import uuid package
+const axios = require('axios'); // Import axios for API calls
+const fs = require('fs'); // Import fs for file operations
+const path = require('path'); // Import path for file paths
 
 // Middleware to check if user is authenticated
 function isAuthenticated(req, res, next) {
@@ -11,30 +14,50 @@ function isAuthenticated(req, res, next) {
     next();
 }
 
-// Helper function to generate random responses
-function getRandomResponse(userMessage) {
-    const responses = {
-        hello: ["Hi there!", "Hello!", "Hey! How can I help you?"],
-        howAreYou: ["I'm just a bot, but I'm doing great!", "I'm here to assist you!", "Feeling helpful today!"],
-        default: ["I'm not sure how to respond to that.", "Can you rephrase?", "Let me think about that."]
-    };
-
-    if (userMessage.toLowerCase().includes("hello")) {
-        return responses.hello[Math.floor(Math.random() * responses.hello.length)];
-    } else if (userMessage.toLowerCase().includes("how are you")) {
-        return responses.howAreYou[Math.floor(Math.random() * responses.howAreYou.length)];
-    } else {
-        return responses.default[Math.floor(Math.random() * responses.default.length)];
+// Helper function to generate random response
+// Helper function to decode JWT token
+const decodeToken = (token) => {
+    try {
+        const payload = token.split('.')[1];
+        const decodedPayload = Buffer.from(payload, 'base64').toString();
+        return JSON.parse(decodedPayload);
+    } catch (error) {
+        console.error('Error decoding token:', error);
+        return null;
     }
+};
+
+// Helper function to call Process Content API
+async function callProcessContentAPIWrapper(activity, content, userId, conversationId, sequenceNumber, token, metadata, scopeIdentifier) {
+    console.log('[Helper] Calling Process Content API');
+    console.log('[Helper] Payload:', {
+        activity,
+        content,
+        userId,
+        conversationId,
+        sequenceNumber,
+        token,
+        metadata,
+        scopeIdentifier
+    });
+
+    return await callProcessContentAPI(
+        activity,
+        content,
+        userId,
+        conversationId,
+        sequenceNumber,
+        token,
+        metadata,
+        scopeIdentifier
+    );
 }
 
 // Get chat page
 router.get('/', isAuthenticated, (req, res) => {
     res.render('chat', {
         title: 'Chat',
-        user: {
-            name: req.session.account.name || req.session.account.username,
-        },
+        userName: req.session.userName, // Pass user's name to the view
         messages: [
             { type: 'user', text: 'Hello!' },
             { type: 'bot', text: 'Hi there! How can I help you?' }
@@ -42,133 +65,96 @@ router.get('/', isAuthenticated, (req, res) => {
     });
 });
 
-// Handle message submission and call Purview API
+// Handle message submission and call Azure OpenAI API
 router.post('/send', isAuthenticated, async (req, res) => {
+    console.log('[POST /send] Received request');
     const { message } = req.body;
-    const userId = req.session.account.idTokenClaims.oid;
-    const accessToken = req.session.purviewToken;
-
-    console.log('Sending request with userId:', userId);
-    console.log('Session account:', req.session.account);
+    console.log('[POST /send] User message:', message);
 
     try {
-        // First call ProtectionScope API to get the scope identifier
-        const scopeResponse = await callProtectionScopeAPI(userId, accessToken);
-        console.log('ProtectionScope raw response:', scopeResponse);
-        
-        // Use the scope identifier directly without additional wrapping
-        const scopeIdentifier = scopeResponse.scopeIdentifier;
-        console.log('Using scopeIdentifier:', scopeIdentifier);
-
-        // Check if conversationId exists in the session; if not, generate a new one
-        if (!req.session.conversationId) {
-            req.session.conversationId = uuidv4(); // Generate a random conversation ID
-            console.log('Generated new conversationId:', req.session.conversationId);
-        } else {
-            console.log('Reusing existing conversationId:', req.session.conversationId);
+        if (!req.session.purviewToken) {
+            return res.status(401).json({ error: 'Purview token not available' });
         }
 
-        const conversationId = req.session.conversationId; // Use session-stored conversationId
-        let sequenceNo = Math.floor(Math.random() * (9999999 - 1000000 + 1)) + 1000000; // Generate random sequence ID
+        const decodedToken = decodeToken(req.session.purviewToken);
+        if (!decodedToken) {
+            return res.status(500).json({ error: 'Failed to decode Purview token' });
+        }
 
-        const metadata = {
-            contentMetadata: {
-                name: "Purview API Explorer",
-                id: uuidv4(), // Replace generateGUID() with uuidv4()
-                ownerId: userId,
-                conversationId: conversationId, // Use session-stored conversationId
-                sequenceNo: sequenceNo.toString()
-            },
-            activityMetadata: {
-                activity: "uploadText",
-                applicationLocation: "PurviewDeveloperPlatformAPIExplorer"
-            },
-            deviceMetadata: {
-                managementType: "managed",
-                operatingSystem: "Windows 11",
-                operatingSystemVersion: "10.0.26100.0"
-            },
-            protectedAppMetadata: {
-                name: "Purview Developer Platform API Explorer",
-                version: "0.1"
-            },
-            integratedAppMetadata: {
-                name: "Purview Developer Platform API Explorer",
-                version: "0.1"
-            },
-            scopeIdentifier: scopeIdentifier
-        };
+        const userId = decodedToken.oid || decodedToken.sub;
+        if (!userId) {
+            return res.status(500).json({ error: 'User ID not found in token' });
+        }
 
-        console.log('Final scopeIdentifier value:', metadata.scopeIdentifier);
-        console.log('Final scopeIdentifier type:', typeof metadata.scopeIdentifier);
-        console.log('Sending metadata:', JSON.stringify(metadata, null, 2));
-        console.log('Message being sent:', message);
+        console.log('[POST /send] Using user ID:', userId);
 
-        // Prepare payload for "uploadText"
-        // const uploadPayload = {
-        //     activity: "uploadText",
-        //     message: message,
-        //     userId: userId,
-        //     conversationId: conversationId,
-        //     sequenceNo: sequenceNo.toString(),
-        //     accessToken: accessToken,
-        //     scopeIdentifier: scopeIdentifier
-        // };
-        // console.log('Payload for uploadText:', JSON.stringify(uploadPayload, null, 2)); // Print payload
+        const conversationId = req.session.conversationId || uuidv4();
+        req.session.conversationId = conversationId;
+        const sequenceNumber = req.session.sequenceNumber || 1;
+        req.session.sequenceNumber = sequenceNumber + 1;
 
-        // // Call ProcessContent API with "uploadText" activity
-        // console.log('Sequence number before uploadText:', sequenceNo); // Print sequence number
-        // console.log('Conversation ID before uploadText:', conversationId); // Print conversation ID
+        // Call Protection Scope API to fetch scope identifier
+        const protectionScopeResponse = await callProtectionScopeAPI(userId, req.session.purviewToken);
+        console.log('[POST /send] Protection Scope API response:', protectionScopeResponse);
 
-        const purviewResponse = await callProcessContentAPI(
-            "uploadText", 
-            message, 
-            userId, 
-            conversationId, // Pass session-stored conversationId
-            sequenceNo.toString(), 
-            accessToken, 
+        const scopeIdentifier = protectionScopeResponse?.scopeIdentifier || "default-scope-id"; // Extract scopeIdentifier
+        console.log('[POST /send] Fetched scopeIdentifier:', scopeIdentifier);
+
+        // Call Process Content API for user prompt
+        const promptResponse = await callProcessContentAPIWrapper(
+            'uploadText',
+            message,
+            userId,
+            conversationId,
+            sequenceNumber,
+            req.session.purviewToken,
+            '{}',
             scopeIdentifier
         );
-        // Log full response
+        console.log('[POST /send] Process Content API response for user prompt:', promptResponse);
 
-        sequenceNo++; // Increment sequence number
+        const openAiResponse = await axios.post(
+            process.env.AZURE_OPENAI_ENDPOINT,
+            {
+                messages: [
+                    { role: "system", content: "You are a helpful assistant." },
+                    { role: "user", content: message }
+                ],
+                max_tokens: 100,
+                temperature: 0.7,
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'api-key': process.env.AZURE_OPENAI_API_KEY,
+                },
+            }
+        );
 
-        // Bot processes the user's message and generates a response
-        const botResponse = getRandomResponse(message);
+        console.log('[POST /send] Azure OpenAI API call successful');
+        const botResponse = openAiResponse.data.choices[0].message.content.trim();
 
-        // Prepare payload for "downloadText"
-        // const downloadPayload = {
-        //     activity: "downloadText",
-        //     message: botResponse,
-        //     userId: userId,
-        //     conversationId: conversationId,
-        //     sequenceNo: sequenceNo.toString(),
-        //     accessToken: accessToken,
-        //     scopeIdentifier: scopeIdentifier
-        // };
-        // console.log('Payload for downloadText:', JSON.stringify(downloadPayload, null, 2)); // Print payload
-
-        // Call ProcessContent API with "downloadText" activity before responding
-        console.log('Sequence number before downloadText:', sequenceNo); // Print sequence number
-        console.log('Conversation ID before downloadText:', conversationId); // Print conversation ID
-
-        const downloadResponse = await callProcessContentAPI(
-            "downloadText", 
-            botResponse, 
-            userId, 
-            conversationId, // Pass session-stored conversationId
-            sequenceNo.toString(), 
-            accessToken, 
+        // Call Process Content API for bot response
+        const botResponseContent = await callProcessContentAPIWrapper(
+            'downloadText',
+            botResponse,
+            userId,
+            conversationId,
+            req.session.sequenceNumber,
+            req.session.purviewToken,
+            '{}',
             scopeIdentifier
         );
-        // Log full response
+        console.log('[POST /send] Process Content API response for bot response:', botResponseContent);
 
-        res.json({ success: true, purviewResponse, botResponse });
-        console.log('Bot response successfully sent:', botResponse); // Log success
+        req.session.sequenceNumber += 1;
+
+        res.json({ success: true, botResponse });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        console.error('[POST /send] API call failed');
+        console.error('[POST /send] Error:', error.response?.data || error.message);
+        res.status(500).json({ success: false, error: error.response?.data || error.message });
     }
 });
 
 module.exports = router;
-module.exports.getRandomResponse = getRandomResponse;

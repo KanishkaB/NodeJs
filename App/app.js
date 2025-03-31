@@ -3,21 +3,20 @@
  * Licensed under the MIT License.
  */
 
-require('dotenv').config();
+const path = require('path'); // Ensure path is imported
+require('dotenv').config({ path: path.join(__dirname, '.env.dev') });
 
 const express = require('express');
-const path = require('path');
 const cookieParser = require('cookie-parser');
 const logger = require('morgan');
 const session = require('express-session');
 const socketIO = require('socket.io');
 const { authProvider } = require('./auth/AuthProvider');
 const config = require('./config');
-const { getRandomResponse } = require('./routes/chat');
 
 const indexRouter = require('./routes/index');
 const authRouter = require('./routes/auth');
-const chatRouter = require('./routes/chat');
+const chatRoutes = require('./routes/chat'); // Ensure the filepath is correct and no duplicates
 const purviewRouter = require('./routes/purview');
 
 const app = express();
@@ -49,7 +48,7 @@ app.use(session({
 // Routes
 app.use('/', indexRouter);
 app.use('/auth', authRouter);
-app.use('/chat', chatRouter);
+app.use('/chat', chatRoutes);
 app.use('/purview', purviewRouter);
 
 // Socket.IO connection handling
